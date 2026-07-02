@@ -1,0 +1,6 @@
+class HiveConfig:
+    MAX_RAM_MB = 4096
+    IDLE_TTL_SEC = 300
+    MEMORY_DECAY = 0.10
+    SIMILARITY_THRESHOLD = 0.5
+    EXPLORATION_RATE = 0.15

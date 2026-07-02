@@ -1,0 +1,16 @@
+Cluster,Query Type,Query Text,Target A Score,Target Rank,Cross-Retrieval?
+1,B,"My PyTorch model is running out of GPU memory during training, what can I do?",0.6695183802456611,1,No
+1,C,Explain the architecture of a PyTorch Transformer model.,0.3119929551883301,1,No
+1,D,How do I convert a PyTorch tensor to a NumPy array?,0.5130792708361764,1,No
+2,B,How can I use BeautifulSoup in Python to extract data from a webpage?,0.5754453772757104,1,No
+2,C,How do I build a REST API in Python using FastAPI?,0.2912783423111505,1,No
+2,D,Write a Python script to calculate the Fibonacci sequence.,0.17962719261399224,1,No
+3,B,Can you convert the following English sentence to French?,0.7178117782510972,1,No
+3,C,What is the history of the French language?,0.39312780042763146,1,No
+3,D,Translate this text into Spanish.,0.7474095033361133,1,No
+4,B,How do I build a custom select component in React?,0.7126592038110258,1,No
+4,C,What are the performance differences between React and Vue?,0.24019905372311215,1,No
+4,D,Create a React component for a date picker.,0.5451067289474726,1,No
+5,B,Compose a haiku about a rainy day.,0.7194364754693947,1,No
+5,C,What is the average annual rainfall in the Amazon rainforest?,0.32912754818164497,1,No
+5,D,Write a short poem about the sun.,0.6676974600141841,1,No
