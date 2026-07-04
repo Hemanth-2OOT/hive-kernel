@@ -8,6 +8,7 @@ from hive.runtime.reservoir import Reservoir
 from hive.core.nucleus import Nucleus
 from hive.core.dag import TaskGraph, Task
 from hive.memory.verifier import SemanticVerifier
+from hive.config import HiveConfig
 
 def print_header(title):
     print(f"\n{'='*50}\n{title}\n{'='*50}")
@@ -25,7 +26,8 @@ def measure_rss():
 
 def run_z1():
     print_header("Z1 Mini - Microbenchmarks")
-    res = Reservoir(max_vram_mb=6144)
+    config = HiveConfig(max_vram_mb=6144)
+    res = Reservoir(config)
     
     # 1. Cold Start
     start = time.time()
@@ -76,9 +78,10 @@ def run_z2():
     results = {}
     
     # Workload A
-    res = Reservoir(max_vram_mb=6144)
+    config = HiveConfig(max_vram_mb=6144)
+    res = Reservoir(config)
     verifier = SemanticVerifier(res)
-    nuc = Nucleus(res)
+    nuc = Nucleus(res, config)
     nuc.hippocampus._verifier = verifier
     
     start_rss = measure_rss()
@@ -100,8 +103,9 @@ def run_z2():
     res.shutdown()
     
     # Workload C (Memory Pressure)
-    res_pressure = Reservoir(max_vram_mb=1200) # Force evictions (aggressive cap)
-    nuc_p = Nucleus(res_pressure)
+    config_pressure = HiveConfig(max_vram_mb=1200) # Force evictions (aggressive cap)
+    res_pressure = Reservoir(config_pressure)
+    nuc_p = Nucleus(res_pressure, config_pressure)
     nuc_p.hippocampus._verifier = SemanticVerifier(res_pressure)
     start_time = time.time()
     for _ in range(2):
