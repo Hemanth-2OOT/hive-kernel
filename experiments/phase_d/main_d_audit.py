@@ -1,7 +1,8 @@
 import os
-from reservoir import Reservoir
-from nucleus_executor import NucleusExecutor
-from task_graph import TaskGraph, Task
+from hive.runtime.reservoir import Reservoir
+from hive.core.nucleus import Nucleus
+from hive.core.dag import TaskGraph, Task
+from hive.config import HiveConfig
 
 def build_sentiment_dag():
     graph = TaskGraph()
@@ -17,8 +18,9 @@ def main():
     if os.path.exists("data/semantic_meta.json"): os.remove("data/semantic_meta.json")
     
     # 1. Start Reservoir with 600MB budget.
-    res = Reservoir(max_ram_mb=600, idle_ttl_sec=300)
-    nucleus = NucleusExecutor(res)
+    config = HiveConfig(max_vram_mb=600, idle_ttl_sec=300)
+    res = Reservoir(config)
+    nucleus = Nucleus(res)
     
     prompt = "I guess it was fine but also terrible. Whatever. FORCE_AMBIGUITY"
     

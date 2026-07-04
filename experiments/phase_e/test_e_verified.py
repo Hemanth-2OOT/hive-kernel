@@ -1,8 +1,8 @@
 import os
 import shutil
-from reservoir import Reservoir
-from hippocampus import Hippocampus
-from verifier import SemanticVerifier
+from hive.runtime.reservoir import Reservoir
+from hive.memory.hippocampus import Hippocampus
+from hive.memory.verifier import SemanticVerifier
 
 def test_verified_retrieval_full():
     print("=== Phase E: Comprehensive Stage 2 Verification Test ===")
@@ -10,8 +10,8 @@ def test_verified_retrieval_full():
     if os.path.exists("data"):
         shutil.rmtree("data")
         
-    res = Reservoir(max_ram_mb=4000, idle_ttl_sec=300)
-    verifier = SemanticVerifier(res, cell_name="llm")
+    res = Reservoir(max_vram_mb=6000, idle_ttl_sec=300)
+    verifier = SemanticVerifier(res, cell_name="hermes3:8b")
     hippo = Hippocampus(res, verifier=verifier)
     
     clusters = {
@@ -19,6 +19,11 @@ def test_verified_retrieval_full():
             "A": "How do I fix a CUDA OutOfMemoryError in PyTorch?",
             "B": "My PyTorch model is running out of GPU memory during training, what can I do?",
             "D": "How do I convert a PyTorch tensor to a NumPy array?"
+        },
+        "2": {
+            "A": "Write a python script to scrape data from a website.",
+            "B": "How can I extract data from HTML using Python?",
+            "D": "Write a python script to scrape rust off metal."
         },
         "3": {
             "A": "Translate this text into French.",

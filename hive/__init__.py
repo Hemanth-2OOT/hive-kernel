@@ -1,4 +1,4 @@
-"""
-Hive: Fault-tolerant local AI orchestration microkernel.
-"""
-__version__ = "0.1.0"
+from hive.api import run, shutdown, HiveResult
+from hive.config import HiveConfig
+
+__all__ = ["run", "shutdown", "HiveResult", "HiveConfig"]

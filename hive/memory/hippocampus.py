@@ -3,11 +3,13 @@ import json
 import numpy as np
 from typing import List, Optional
 from hive.memory.verifier import SemanticVerifier, MemoryCandidate, VerifiedMemory, VerificationError
+from hive.config import HiveConfig
 import hashlib
 
 class Hippocampus:
-    def __init__(self, reservoir, verifier: Optional[SemanticVerifier] = None):
+    def __init__(self, reservoir, verifier: Optional[SemanticVerifier] = None, config: HiveConfig = None):
         self.reservoir = reservoir
+        self.config = config or HiveConfig()
         self._verifier = verifier
         self.data_dir = "data"
         os.makedirs(self.data_dir, exist_ok=True)
@@ -53,7 +55,10 @@ class Hippocampus:
         self.metadata.append(metadata)
         self._save_semantic()
 
-    def recall_from_text(self, text: str, top_k: int = 3, task_id: int = 0):
+    def recall_from_text(self, text: str, top_k: int = None, task_id: int = 0):
+        if top_k is None:
+            top_k = self.config.top_k_recall
+            
         if not self.embeddings:
             return []
             
@@ -81,7 +86,7 @@ class Hippocampus:
         results = []
         for idx in top_indices:
             # Threshold to prevent completely unrelated matches from returning
-            if similarities[idx] > 0.5:
+            if similarities[idx] > self.config.similarity_threshold:
                 results.append({
                     "score": float(similarities[idx]),
                     "memory": self.metadata[idx]
@@ -90,7 +95,7 @@ class Hippocampus:
         return results
 
     def query(self, query_text: str, task_id: Optional[int] = 0) -> List[MemoryCandidate]:
-        results = self.recall_from_text(query_text, top_k=5, task_id=task_id)
+        results = self.recall_from_text(query_text, top_k=self.config.top_k_recall + 2, task_id=task_id)
         candidates = []
         for r in results:
             candidates.append(MemoryCandidate(

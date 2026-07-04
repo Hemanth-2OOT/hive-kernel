@@ -10,25 +10,23 @@ from hive.memory.hippocampus import Hippocampus
 from hive.memory.consolidator import Consolidator
 from hive.adaptation.oracle import Oracle
 from hive.core.validator import PolicyValidator
-
-# Semantic intent to physical Cell routing table
-TASK_TO_CELL = {
-    "generate": "llm",
-    "summarize": "llm",
-    "classify": "sentiment",
-    "sentiment": "sentiment",
-    "embed": "embedding",
-    "llm_verify": "llm"
-}
+from hive.memory.consolidator import Consolidator
+from hive.config import HiveConfig
 
 class Nucleus:
-    def __init__(self, reservoir: Reservoir):
+    def __init__(self, reservoir, config: HiveConfig = None):
         self.reservoir = reservoir
+        self.config = config or HiveConfig()
+        
+        # Core components
+        self.hippocampus = Hippocampus(self.reservoir, config=self.config)
         self.reflex_engine = ReflexEngine()
-        self.hippocampus = Hippocampus(self.reservoir)
         self.consolidator = Consolidator()
         self.oracle = Oracle()
-        self.policy_validator = PolicyValidator(self.hippocampus, exploration_rate=0.1)
+        self.policy_validator = PolicyValidator(self.hippocampus, config=self.config)
+        
+        # Map DAG task types to Reservoir cell types
+        self.task_to_cell = self.config.task_to_cell
         
     def execute(self, graph: TaskGraph, raw_input: str) -> ExecutionContext:
         context = ExecutionContext(raw_input)
@@ -66,7 +64,7 @@ class Nucleus:
         
         def worker_task(task: Task, payload: str):
             # Pure worker: no DAG mutation, no state mutation.
-            cell_type = TASK_TO_CELL.get(task.type)
+            cell_type = self.task_to_cell.get(task.type)
             try:
                 if task.type == "summarize":
                     formatted_payload = f"Summarize the following text in exactly 5 words:\n{payload}"
@@ -151,7 +149,7 @@ class Nucleus:
                         telemetry = resp.get("telemetry", {})
                         context.update_metrics(
                             cold_started=telemetry.get("cold_start", False),
-                            current_ram=self.reservoir.get_total_rss()
+                            current_ram=self.reservoir.get_total_vram()
                         )
                         
                         system_signals = telemetry.get("system_signals", [])
@@ -216,11 +214,24 @@ class Nucleus:
                 for rec in recommendations:
                     print(f"  [ORACLE] {rec.get('description', str(rec))}")
                     
-            print("[NUCLEUS] Consolidating Trace into Hippocampus...")
-            lesson = self.consolidator.consolidate(trace)
-            
-            self.hippocampus.append_episode(trace)
-            self.hippocampus.store_semantic(raw_input, lesson)
+            import time
+            start_bg_time = time.time()
+            print("[NUCLEUS] Consolidating Trace into Hippocampus (Background)...")
+            def background_consolidation(trace_payload, raw_input_str, start_t, ctx):
+                try:
+                    lesson_out = self.consolidator.consolidate(trace_payload)
+                    self.hippocampus.append_episode(trace_payload)
+                    self.hippocampus.store_semantic(raw_input_str, lesson_out)
+                    end_t = time.time()
+                    print(f"[HIPPOCAMPUS] Memory Stored (Async consolidation finished in {end_t - start_t:.2f}s after handoff)")
+                except Exception as e:
+                    print(f"[BACKGROUND CONSOLIDATION FAILED] {e}")
+                    ctx.consolidation_error = e
+
+            import threading
+            bg_thread = threading.Thread(target=background_consolidation, args=(trace, raw_input, start_bg_time, context))
+            bg_thread.start()
+            context.consolidation_thread = bg_thread
             
             return context
             

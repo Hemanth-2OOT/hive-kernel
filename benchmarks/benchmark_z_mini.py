@@ -25,7 +25,7 @@ def measure_rss():
 
 def run_z1():
     print_header("Z1 Mini - Microbenchmarks")
-    res = Reservoir(max_ram_mb=8000)
+    res = Reservoir(max_vram_mb=6144)
     
     # 1. Cold Start
     start = time.time()
@@ -76,7 +76,7 @@ def run_z2():
     results = {}
     
     # Workload A
-    res = Reservoir(max_ram_mb=8000)
+    res = Reservoir(max_vram_mb=6144)
     verifier = SemanticVerifier(res)
     nuc = Nucleus(res)
     nuc.hippocampus._verifier = verifier
@@ -100,7 +100,7 @@ def run_z2():
     res.shutdown()
     
     # Workload C (Memory Pressure)
-    res_pressure = Reservoir(max_ram_mb=1200) # Force evictions (aggressive cap)
+    res_pressure = Reservoir(max_vram_mb=1200) # Force evictions (aggressive cap)
     nuc_p = Nucleus(res_pressure)
     nuc_p.hippocampus._verifier = SemanticVerifier(res_pressure)
     start_time = time.time()

@@ -1,44 +1,47 @@
 import subprocess
 import json
+import os
+import sys
 import time
-import psutil
 import threading
+import random
+import urllib.request
 from collections import defaultdict
+from hive.config import HiveConfig
 
-CELL_PROFILES = {
-    "sentiment": 550,
-    "embedding": 400,
-    "llm": 1500
-}
-
-PRIORITY = {
-    "embedding": 3,
-    "sentiment": 2,
-    "llm": 1
-}
+class ReservoirContentionTimeout(Exception):
+    pass
 
 class Reservoir:
-    def __init__(self, max_ram_mb=4096, idle_ttl_sec=300):
+    def __init__(self, config: HiveConfig = None):
+        self.config = config or HiveConfig()
+        self.max_vram_mb = self.config.max_vram_mb
+        self.idle_ttl_sec = self.config.idle_ttl_sec
+        self.cell_profiles = self.config.cell_profiles
+        self.priority = self.config.cell_priorities
+        self.cell_lock_order = self.config.cell_lock_order
+
         self.cells = {}
         self.last_used = {}
-        self.max_ram_mb = max_ram_mb
-        self.idle_ttl_sec = idle_ttl_sec
         
         self.topology_lock = threading.Lock()
+        
+        # INVARIANT: Callers must NEVER hold a `cell_lock` across a call into another cell
+        # (e.g. holding sentiment and calling infer() for qwen). Doing so violates the global
+        # CELL_LOCK_ORDER and will trigger a true OS-style circular deadlock, which is currently
+        # caught and aborted by the ReservoirContentionTimeout bounded wait.
+        # `cell_locks` should be treated as INTERNAL to Reservoir, NOT a public API.
         self.cell_locks = defaultdict(threading.Lock)
 
-    def _get_rss(self, pid):
-        try:
-            return psutil.Process(pid).memory_info().rss / 1e6
-        except psutil.NoSuchProcess:
-            return 0.0
+    def _get_vram(self, cell_type):
+        return self.cell_profiles.get(cell_type, 500)
 
-    def get_total_rss(self):
+    def get_total_vram(self):
         with self.topology_lock:
             total = 0.0
             for cell_type, proc in self.cells.items():
                 if proc and proc.poll() is None:
-                    total += self._get_rss(proc.pid)
+                    total += self._get_vram(cell_type)
             return total
 
     def cleanup_idle(self):
@@ -59,7 +62,7 @@ class Reservoir:
         with self.topology_lock:
             return self._select_victim_unsafe()
 
-    def _select_victim_unsafe(self):
+    def _select_victim_unsafe(self, ignore_locks=False):
         now = time.time()
         best_victim = None
         max_score = -1.0
@@ -68,11 +71,14 @@ class Reservoir:
             if not proc or proc.poll() is not None:
                 continue
             
-            rss = self._get_rss(proc.pid)
-            idle_seconds = now - self.last_used.get(cell_type, now)
-            priority = PRIORITY.get(cell_type, 1)
+            if not ignore_locks and self.cell_locks[cell_type].locked():
+                continue
             
-            score = (rss * idle_seconds) / priority
+            vram = self._get_vram(cell_type)
+            idle_seconds = now - self.last_used.get(cell_type, now)
+            priority = self.priority.get(cell_type, 1)
+            
+            score = (vram * idle_seconds) / priority
             if score > max_score:
                 max_score = score
                 best_victim = cell_type
@@ -81,25 +87,79 @@ class Reservoir:
 
     def ensure_capacity(self, required_mb):
         with self.topology_lock:
-            self._ensure_capacity_unsafe(required_mb)
+            self._ensure_capacity_unsafe(required_mb, cell_type="unknown")
             
-    def _ensure_capacity_unsafe(self, required_mb):
+    def _current_vram(self):
+        t = 0.0
+        for ct, proc in self.cells.items():
+            if proc and proc.poll() is None:
+                t += self._get_vram(ct)
+        return t
+
+    def _ensure_capacity_unsafe(self, required_mb: float, cell_type: str):
+        dead_cells = [c for c, p in self.cells.items() if p and p.poll() is not None]
+        for c in dead_cells:
+            print(f"[RESERVOIR] Automatically cleaning up dead ghost cell: {c}", flush=True)
+            del self.cells[c]
+            
         self._cleanup_idle_unsafe()
         
-        def _current_rss():
-            t = 0.0
-            for ct, proc in self.cells.items():
-                if proc and proc.poll() is None:
-                    t += self._get_rss(proc.pid)
-            return t
+        attempts = 0
+        
+        if required_mb > self.max_vram_mb:
+            raise MemoryError(f"Cell {cell_type} requires {required_mb}MB but max budget is {self.max_vram_mb}MB.")
             
-        while _current_rss() + required_mb > self.max_ram_mb:
-            victim = self._select_victim_unsafe()
+        while self._current_vram() + required_mb > self.max_vram_mb:
+            if attempts >= 20:
+                active_locks = [c for c in self.cells if self.cell_locks[c].locked()]
+                raise ReservoirContentionTimeout(
+                    f"Could not acquire VRAM for {cell_type} (needed {required_mb}MB). Locked cells: {active_locks}"
+                )
+                
+            victim = self._select_victim_unsafe(ignore_locks=False)
             if not victim:
-                raise RuntimeError(f"Cannot free enough RAM for {required_mb}MB. Budget too tight.")
-            
-            print(f"[{victim.upper()}] Evicted due to RAM Budget (Total would exceed {self.max_ram_mb}MB)", flush=True)
-            self._kill_cell_unsafe(victim)
+                # If we can't find an unlocked victim, we MUST evict a locked victim to prevent deadlock.
+                # But we must acquire its lock in CELL_LOCK_ORDER!
+                victim = self._select_victim_unsafe(ignore_locks=True)
+                if not victim:
+                    raise MemoryError(f"No cells available to evict for {cell_type}")
+                
+                # Sort acquisition attempts by CELL_LOCK_ORDER
+                locks_to_acquire = [cell_type, victim]
+                locks_to_acquire.sort(key=lambda c: self.cell_lock_order.index(c) if c in self.cell_lock_order else 99)
+                
+                # We need to temporarily release topology lock to avoid deadlocking with threads 
+                # that hold cell locks and need topology lock.
+                self.topology_lock.release()
+                
+                acquired = []
+                success = True
+                import random
+                jitter = random.uniform(0.5, 1.5)
+                for c in locks_to_acquire:
+                    if self.cell_locks[c].acquire(timeout=jitter):
+                        acquired.append(c)
+                    else:
+                        success = False
+                        break
+                
+                # Re-acquire topology lock
+                self.topology_lock.acquire()
+                
+                if success:
+                    # We hold both locks! Kill victim.
+                    print(f"[{victim.upper()}] Evicted due to VRAM Budget (Total would exceed {self.max_vram_mb}MB)", flush=True)
+                    self._kill_cell_unsafe(victim)
+                    for c in reversed(acquired):
+                        self.cell_locks[c].release()
+                else:
+                    for c in reversed(acquired):
+                        self.cell_locks[c].release()
+                    attempts += 1
+                    continue
+            else:
+                print(f"[{victim.upper()}] Evicted due to VRAM Budget (Total would exceed {self.max_vram_mb}MB)", flush=True)
+                self._kill_cell_unsafe(victim)
 
     def evict_cell(self, cell_type):
         with self.topology_lock:
@@ -116,6 +176,23 @@ class Reservoir:
             del self.cells[cell_type]
             if cell_type in self.last_used:
                 del self.last_used[cell_type]
+                
+            if cell_type in ["hermes3:8b", "qwen2.5-coder:7b", "llm"]:
+                try:
+                    req = urllib.request.Request("http://localhost:11434/api/generate", method="POST")
+                    req.add_header('Content-Type', 'application/json')
+                    urllib.request.urlopen(req, data=json.dumps({"model": cell_type, "keep_alive": 0}).encode())
+                    # Synchronous verify
+                    for _ in range(10):
+                        req_ps = urllib.request.Request("http://localhost:11434/api/ps")
+                        with urllib.request.urlopen(req_ps) as response:
+                            data = json.loads(response.read().decode())
+                            models = [m["name"] for m in data.get("models", [])]
+                            if not any(m.startswith(cell_type) for m in models):
+                                break
+                        time.sleep(1)
+                except Exception as e:
+                    print(f"Error unloading {cell_type} from Ollama: {e}", flush=True)
 
     def start_cell(self, cell_type: str) -> None:
         with self.topology_lock:
@@ -125,22 +202,21 @@ class Reservoir:
         if cell_type in self.cells and self.cells[cell_type].poll() is None:
             return 
             
-        required_mb = CELL_PROFILES.get(cell_type, 500)
-        self._ensure_capacity_unsafe(required_mb)
+        required_mb = self.cell_profiles.get(cell_type, 500)
+        self._ensure_capacity_unsafe(required_mb, cell_type=cell_type)
         
-        import os
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         if cell_type == "sentiment":
             script = os.path.join(base_dir, "cells", "sentiment_server.py")
         elif cell_type == "embedding":
             script = os.path.join(base_dir, "cells", "embedding_server.py")
-        elif cell_type == "llm":
+        elif cell_type in ["hermes3:8b", "qwen2.5-coder:7b", "llm"]:
             script = os.path.join(base_dir, "cells", "llm_server.py")
         else:
             raise ValueError(f"Unknown cell type: {cell_type}")
             
         proc = subprocess.Popen(
-            ["python", script],
+            ["python", script, cell_type],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -165,28 +241,40 @@ class Reservoir:
     def infer(self, cell_type: str, task_id: int, payload: str) -> dict:
         cold_started = False
         
-        with self.topology_lock:
-            if cell_type not in self.cells or self.cells[cell_type].poll() is not None:
-                print(f"[{cell_type.upper()}] Cold start triggered by infer()...", flush=True)
-                self._start_cell_unsafe(cell_type)
-                cold_started = True
+        while True:
+            with self.topology_lock:
+                if cell_type not in self.cells or self.cells[cell_type].poll() is not None:
+                    print(f"[{cell_type.upper()}] Cold start triggered by infer()...", flush=True)
+                    self._start_cell_unsafe(cell_type)
+                    cold_started = True
+                    break
+                else:
+                    break
+            print(f"[{cell_type.upper()}] VRAM Budget too tight to start. Blocking...", flush=True)
+            time.sleep(1.0)
 
-        # ARCHITECTURAL INVARIANT: Write + Read MUST remain atomic inside cell_locks.
-        # If writing and reading are split into separate locks "for performance", 
-        # a thread crash mid-flight will leave unpredictable orphaned lines stacking up in the pipe.
-        # This atomic lock guarantees at most one orphaned line can ever exist at a time,
-        # which is safely drained by the task_id matching loop below.
         with self.cell_locks[cell_type]:
             proc = self.cells.get(cell_type)
             if not proc or proc.poll() is not None:
-                with self.topology_lock:
-                    self._start_cell_unsafe(cell_type)
-                    cold_started = True
+                while True:
+                    with self.topology_lock:
+                        self._start_cell_unsafe(cell_type)
+                        cold_started = True
+                        break
+                    print(f"[{cell_type.upper()}] VRAM Budget too tight to start inside lock. Blocking...", flush=True)
+                    time.sleep(1.0)
                 proc = self.cells.get(cell_type)
                 
             self.last_used[cell_type] = time.time()
 
             req = {"task_id": task_id, "payload": payload}
+            if "CRASH_CLIENT_TORN_WRITE" in payload and task_id == 1:
+                # Write partial JSON without a newline
+                proc.stdin.write(json.dumps(req)[:10])
+                proc.stdin.flush()
+                print(f"[RESERVOIR] DELIBERATE CRASH mid-write for Task {task_id}!", flush=True)
+                raise RuntimeError("Mid-write thread crash simulated")
+
             proc.stdin.write(json.dumps(req) + "\n")
             proc.stdin.flush()
 
@@ -206,10 +294,12 @@ class Reservoir:
                     break
                 else:
                     print(f"[{cell_type.upper()}] DRAINED ORPHANED LINE (Expected {task_id}, Got {resp_task_id}): {line.strip()}", flush=True)
+                    if resp.get("status") == "error" and resp_task_id is None:
+                        raise RuntimeError(f"Cell {cell_type} consumed request in a malformed payload (torn write). Failing fast to prevent deadlock. Error: {resp.get('error')}")
             
             self.last_used[cell_type] = time.time()
-            total_rss = self.get_total_rss()
-            memory_pressure = min(1.0, total_rss / self.max_ram_mb)
+            total_vram = self.get_total_vram()
+            memory_pressure = min(1.0, total_vram / self.max_vram_mb)
             active_cells = len([c for c in self.cells.values() if c and c.poll() is None])
             congestion = min(1.0, active_cells / 3.0) 
             
@@ -229,10 +319,6 @@ class Reservoir:
                 "signal_type": "congestion",
                 "strength": round(congestion, 4)
             })
-            
-            if hasattr(self, "debug_barrier") and self.debug_barrier:
-                if not hasattr(self, "debug_barrier_tasks") or task_id in self.debug_barrier_tasks:
-                    self.debug_barrier.wait()
             
             return resp
 

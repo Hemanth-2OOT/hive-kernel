@@ -52,8 +52,10 @@ class SemanticVerifier:
     verified candidates rather than silently trusting Stage 1.
     """
 
-    VERIFY_PROMPT_TEMPLATE = """Task: Determine if the candidate memory is EXACTLY the same underlying task/intent as the QUERY.
-Lexical overlap (e.g. translating to different languages) means NO.
+    VERIFY_PROMPT_TEMPLATE = """Task: Compare the underlying intent and specific parameters/entities between the QUERY and the CANDIDATE.
+Step 1: Identify the core action/intent.
+Step 2: Identify the specific parameters/entities involved (e.g., target language, specific error name, subject of a poem, specific UI component type).
+Step 3: If the core action is the same AND all specific parameters/entities match (or are synonymous), output YES. If ANY specific parameter (like target language, subject, or UI component) differs, you MUST output NO.
 
 QUERY: {query}
 CANDIDATE: {candidate_content}
@@ -61,7 +63,7 @@ CANDIDATE: {candidate_content}
 Output EXACTLY one word: YES or NO.
 OUTPUT:"""
 
-    def __init__(self, reservoir, cell_name: str = "llm"):
+    def __init__(self, reservoir, cell_name: str = "hermes3:8b"):
         self._reservoir = reservoir
         self._cell_name = cell_name
 

@@ -1,11 +1,13 @@
 import random
 from hive.core.dag import TaskGraph, Task
 from hive.memory.hippocampus import Hippocampus
+from hive.config import HiveConfig
 
 class PolicyValidator:
-    def __init__(self, hippocampus: Hippocampus, exploration_rate: float = 0.1):
+    def __init__(self, hippocampus: Hippocampus, config: HiveConfig = None):
         self.hippocampus = hippocampus
-        self.exploration_rate = exploration_rate
+        self.config = config or HiveConfig()
+        self.exploration_rate = self.config.exploration_rate
         
     def validate_and_mutate(self, graph: TaskGraph, raw_input: str) -> TaskGraph:
         if random.random() < self.exploration_rate:

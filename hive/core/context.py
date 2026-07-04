@@ -15,11 +15,29 @@ class ExecutionContext:
         self.peak_ram_mb = 0.0
         self.cold_starts = 0
         self.evictions = 0
+        self._consolidation_error = None
+        self.consolidation_thread = None
+        self._consolidation_waited = False
         
         # Fine-grained locks for thread safety
         self.results_lock = threading.Lock()
         self.signals_lock = threading.Lock()
         self.metrics_lock = threading.Lock()
+        
+    @property
+    def consolidation_error(self):
+        if not self._consolidation_waited and self.consolidation_thread and self.consolidation_thread.is_alive():
+            raise RuntimeError("Race Condition: Cannot access consolidation_error before calling wait_for_consolidation().")
+        return self._consolidation_error
+        
+    @consolidation_error.setter
+    def consolidation_error(self, value):
+        self._consolidation_error = value
+
+    def wait_for_consolidation(self, timeout=None):
+        if self.consolidation_thread:
+            self.consolidation_thread.join(timeout=timeout)
+        self._consolidation_waited = True
 
     def serialize_trace(self) -> dict:
         self.end_time = time.time()
@@ -123,6 +141,10 @@ def __init__(self, raw_input: str):
     self.peak_ram_mb = 0.0
     self.cold_starts = 0
     self.evictions = 0
+    
+    self._consolidation_error = None
+    self.consolidation_thread = None
+    self._consolidation_waited = False
     
     self._results_lock = threading.RLock()
     self._signals_lock = threading.RLock()

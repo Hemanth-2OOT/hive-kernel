@@ -1,73 +1,87 @@
 import sys
 import json
 import os
-import warnings
+import urllib.request
 
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["HF_HUB_OFFLINE"] = "1"
-warnings.filterwarnings("ignore")
+def query_ollama(model_name, prompt):
+    req = urllib.request.Request("http://localhost:11434/api/generate", method="POST")
+    req.add_header('Content-Type', 'application/json')
+    data = json.dumps({
+        "model": model_name,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": 0.0}
+    }).encode()
+    with urllib.request.urlopen(req, data=data) as response:
+        result = json.loads(response.read().decode())
+        return result.get("response", "").strip()
 
 def main():
     sys.stdout.write('{"status":"booting"}\n')
     sys.stdout.flush()
 
+    if len(sys.argv) > 1:
+        model_name = sys.argv[1]
+    else:
+        model_name = "qwen2.5-coder:7b"
+
     try:
-        from transformers import logging as hf_logging
-        hf_logging.set_verbosity_error()
-        from transformers import pipeline
-        
-        clf = pipeline(
-            "text-generation", 
-            model="Qwen/Qwen2.5-0.5B", 
-            device="cpu"
-        )
+        # Ping Ollama to ensure it's alive and loaded
+        query_ollama(model_name, "")
     except Exception as e:
+        sys.stderr.write(f"LLM Server failed to boot model {model_name}: {e}\n")
         sys.exit(1)
 
     sys.stdout.write('{"status":"ready"}\n')
     sys.stdout.flush()
 
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-            
-        try:
-            req = json.loads(line)
-            task_id = req.get("task_id")
-            payload = req.get("payload")
-            
-            if not isinstance(payload, str):
-                raise ValueError("Payload must be a string")
-            
-            result = clf(payload, max_new_tokens=2, temperature=0.0, do_sample=False, return_full_text=False)
-            # Do NOT prefix with [RESPONSE TO TASK X] if we need to parse JSON directly
-            gen_text = result[0]["generated_text"].strip()
-            
-            resp = {
-                "task_id": task_id,
-                "status": "done",
-                "result": {
-                    "text": gen_text
-                }
-            }
-        except Exception as e:
-            t_id = None
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+                
             try:
-                t_id = json.loads(line).get("task_id")
-            except:
-                pass
-            resp = {
-                "task_id": t_id,
-                "status": "error",
-                "error": str(e)
-            }
-            
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+                req = json.loads(line)
+                task_id = req.get("task_id")
+                payload = req.get("payload")
+                
+                if not isinstance(payload, str):
+                    raise ValueError("Payload must be a string")
+                
+                gen_text = query_ollama(model_name, payload)
+                
+                resp = {
+                    "task_id": task_id,
+                    "status": "done",
+                    "result": {
+                        "text": gen_text
+                    }
+                }
+            except Exception as e:
+                t_id = None
+                try:
+                    t_id = json.loads(line).get("task_id")
+                except:
+                    pass
+                resp = {
+                    "task_id": t_id,
+                    "status": "error",
+                    "error": str(e)
+                }
+                
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+    finally:
+        # Reached EOF (parent died or closed stdin), or child caught a signal (SIGINT)
+        # Unload the model from Ollama's VRAM
+        try:
+            req = urllib.request.Request("http://localhost:11434/api/generate", method="POST")
+            req.add_header('Content-Type', 'application/json')
+            data = json.dumps({"model": model_name, "keep_alive": 0}).encode()
+            urllib.request.urlopen(req, data=data)
+        except:
+            pass
 
 if __name__ == "__main__":
     main()

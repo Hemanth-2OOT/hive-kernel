@@ -1,6 +1,8 @@
 import time
 import psutil
-from reservoir import Reservoir
+from hive.runtime.reservoir import Reservoir
+
+from hive.config import HiveConfig
 
 def get_child_rss(pid):
     try:
@@ -10,7 +12,8 @@ def get_child_rss(pid):
 
 def main():
     print("=== Phase B1: Multi-Cell Coexistence Benchmark ===")
-    res = Reservoir()
+    config = HiveConfig()
+    res = Reservoir(config)
     
     print("Spawning Sentiment (Type S)...")
     res.start_cell("sentiment")
@@ -19,18 +22,18 @@ def main():
     res.start_cell("embedding")
     
     print("Spawning LLM (Type D)...")
-    res.start_cell("llm")
+    res.start_cell("qwen2.5-coder:7b")
     
     pids = {
         "sentiment": res.get_child_pid("sentiment"),
         "embedding": res.get_child_pid("embedding"),
-        "llm": res.get_child_pid("llm")
+        "llm": res.get_child_pid("qwen2.5-coder:7b")
     }
     
     print("\nWarm up (Cold Starts for all 3)...")
     res.infer("sentiment", 0, "cold start")
     res.infer("embedding", 0, "cold start")
-    res.infer("llm", 0, "cold start")
+    res.infer("qwen2.5-coder:7b", 0, "cold start")
     
     print("\nExecuting 10 rounds of alternating inferences...")
     
@@ -49,7 +52,7 @@ def main():
         print(f"Embedding | VecLen: {v_len} | RSS: {rss_e:.1f} MB")
         
         # 3. LLM
-        resp_l = res.infer("llm", i*10+2, f"Briefly explain number {i}:")
+        resp_l = res.infer("qwen2.5-coder:7b", i*10+2, f"Briefly explain number {i}:")
         rss_l = get_child_rss(pids["llm"])
         t_len = len(resp_l.get('result', {}).get('text', ''))
         print(f"LLM       | OutLen: {t_len:3d} chars | RSS: {rss_l:.1f} MB")

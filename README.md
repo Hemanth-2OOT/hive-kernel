@@ -6,13 +6,13 @@
 ![Status](https://img.shields.io/badge/status-research_prototype-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Hive is a research-oriented **experimental fault-tolerant local AI orchestration microkernel**. It is designed to run multiple ML workloads under constrained hardware (consumer laptops / edge devices). Hive is **not** a chatbot, an agent wrapper, or an AutoGPT clone. 
+Hive is a research-oriented experimental fault-tolerant local AI orchestration microkernel. It is designed to run multiple ML workloads under constrained hardware (consumer laptops / edge devices). Hive is not a chatbot, an agent wrapper, or an AutoGPT clone. 
 
-It treats AI execution as an **operating systems problem**, optimizing for survival, fault containment, and memory safety over raw speed.
+It treats AI execution as an operating systems problem, optimizing for survival, fault containment, and memory safety over raw throughput.
 
 ---
 
-## 🛑 The Problem Statement
+## The Problem Statement
 
 Running complex, multi-model AI workflows on local hardware usually ends in catastrophic failure. Existing AI orchestration systems and naive pipelines fail because they do not respect the physical constraints of the host machine:
 
@@ -34,7 +34,7 @@ Hive explores a different question:
 
 ---
 
-## 🛠️ Why Hive Exists
+## Why Hive Exists
 
 Why build Hive instead of using Ray, Threadpools, Agent frameworks, or Async pipelines?
 
@@ -43,6 +43,14 @@ Why build Hive instead of using Ray, Threadpools, Agent frameworks, or Async pip
 - **Agent Frameworks (AutoGPT, LangChain):** These focus on API routing and prompt chaining, blindly trusting that the underlying compute environment has infinite capacity.
 
 **Hive optimizes for survival and fault containment.** It operates under the assumption that ML processes *will* crash, hang, and exhaust resources. When a model fails, Hive isolates the failure, gracefully degrades the specific execution branch, and keeps the global scheduler alive.
+
+---
+
+## Experimental Validation Philosophy
+
+Hive was developed strictly through adversarial systems audits, not just happy-path demonstrations. Every major subsystem was intentionally stress-tested under race conditions, OOM (out-of-memory) pressure, deadlocks, IPC stream corruption, and unhandled lifecycle crashes. 
+
+Hive only considers a subsystem “complete” once its failure modes are empirically understood, isolated, and bounded. Patching around lucky behavior is rejected in favor of explicit, bounded, and testable engineering guarantees.
 
 ---
 
@@ -66,47 +74,72 @@ Hive isolates execution logic from orchestration logic.
 [Reflex Engine + Hippocampus] ←──(Adaptive Recovery & Semantic Memory)
 ```
 
-## 📂 Repository Structure
+---
 
-```text
-hive/
- ├─ core/         # Scheduling and DAG execution
- ├─ runtime/      # Memory + process management
- ├─ adaptation/   # Reflex and routing adaptation
- └─ memory/       # Semantic memory systems
+## Empirical Proofs / Key Findings
 
-cells/            # Isolated ML subprocess workers
-benchmarks/       # Phase Z benchmark suite
-tests/            # Runtime tests
-docs/             # Architecture and audit notes
-experiments/      # Historical development phases
-```
+The following are the strongest empirical results derived during adversarial phase auditing:
+
+### Hard Cell Isolation
+- **PyTorch leak containment:** Achieved via strict OS subprocess isolation.
+- **Latency improvement:** Context switching dropped from ~8,000ms to ~38ms via optimized IPC piping.
+- **Memory Safety:** Proved that generative LLM KV caches plateau and are reliably flushed rather than leaking unboundedly into the orchestrator.
+
+### VRAM Scheduling (Phase B)
+- **Environment:** Tested on an RTX 4050 Laptop GPU (6GB VRAM constraint).
+- **Workloads:** `hermes3:8b` (≈ 5300MB) and `qwen2.5-coder:7b` (≈ 4900MB).
+- **Result:** Attempting to run both models concurrently caused a ~300% latency spike due to extreme PCIe thrashing.
+- **Solution:** Hive now strictly enforces a single-heavyweight-model scheduling topology. Deadlocks during model eviction are prevented via a deterministic locking hierarchy.
+
+### Parallel DAG Execution
+- Hive relies on a `ThreadPoolExecutor` for concurrent graph resolution.
+- To eliminate torn reads and race conditions during DAG evaluation, state mutations are rigorously single-threaded through a queue-based serialization mechanism.
+
+### Fault Containment Index
+- Internal chaos engineering benchmarks achieved a **Fault Containment Index (FCI) = 1.0**.
+- *FCI is defined as: the fraction of subsystem failures contained without global scheduler collapse.* Hive successfully isolates 100% of injected worker crashes, OOMs, and torn writes.
 
 ---
 
-## ✨ Key Features
+## Major Bugs Discovered During Audits
 
-- **Fault Containment:** Hard cell architecture completely isolates ML worker crashes from the central orchestration loop.
-- **Memory-Bounded Execution:** The Reservoir actively monitors RSS and evicts idle or lower-priority models to strictly respect user-defined RAM caps.
-- **DAG Scheduling:** Translates complex workflows into directed acyclic graphs for parallel execution.
-- **Adaptive Recovery:** Cascades failures seamlessly. If a branch fails due to resource exhaustion, it gracefully degrades rather than deadlocking.
-- **Semantic Memory:** Learns from past execution topologies, bypassing redundant task branches by recalling cached state.
-- **Benchmark Suite:** Comes with a rigorous Phase Z benchmark suite targeting micro-latencies and chaos engineering.
+The adversarial auditing philosophy surfaced several subtle race conditions and systems bugs that were systematically isolated and repaired:
+
+| Bug | Failure Mode | Fix |
+|---|---|---|
+| **Misdirected Apoptosis Bug** | An OOM failure in a dynamic Reflex task caused the global executor to blindly penalize an innocent semantic memory. | Intercepted OOMs and injected "task origin" metadata, cleanly cascading failures down the specific DAG branch while protecting the Hippocampus. |
+| **IPC Stream Desynchronization** | A thread crashing mid-flight left orphaned output in the IPC pipe, permanently shifting the communication stream off-by-one for all future concurrent callers. | Implemented robust `task_id` identity verification, transparently draining orphaned lines to instantly restore synchronization. |
+| **Torn Write Deadlock** | A mid-write crash produced malformed JSON; the child consumed the next thread's payload trying to complete it, returning a null task ID and deadlocking the parent's read loop. | Intercepted null task IDs as fatal errors, failing-fast with a `RuntimeError` to break the deadlock and leave the pipe clean. |
+| **Infinite Retry Bug** | Requesting a model whose baseline footprint exceeded the absolute hardware VRAM ceiling caused the scheduler to infinitely retry and hang the swarm. | Proactively implemented a fail-fast mechanism throwing a terminal `MemoryError` before attempting impossible allocations. |
+| **Shutdown Rug-Pull Race** | Calling `hive.shutdown()` before process exit aggressively tore down the Reservoir while detached asynchronous Consolidator threads were still writing memory traces. | Added explicit execution tracking and a bounded asynchronous shutdown wait-loop to safely land background tasks. |
+| **Ghost Cell VRAM Leak** | Unhandled interpreter crashes (`os._exit` or `SIGINT`) bypassed standard teardown, leaving gigabyte-sized models permanently marooned in VRAM. | Leveraged OS pipe EOF guarantees to trigger a synchronous C-level cleanup hook directly inside the child process loop exit. |
 
 ---
 
-## 📊 Benchmark Summary
+## Architectural Invariants
 
-Hive was tested against an aggressive Phase Z benchmark on consumer hardware (i7-12650HX, 16GB RAM, RTX 4050 6GB). 
+The following load-bearing rules govern Hive's codebase. Violating these invariants may silently corrupt scheduler correctness and reintroduce deadlocks:
 
-- **Cold Start Penalty:** `4.369s` (OS subprocess initialization)
-- **IPC Round-Trip (p50):** `0.016s` (Highly efficient pipe serialization)
-- **Sequential DAG Latency:** `~1.10s`
-- **Parallel DAG Latency:** `3.15s`
-- **Memory Pressure Test:** `7.61s` @ `1200MB cap`
-- **Internal FCI benchmark score:** `1.0`
+* **Reservoir write/read operations must remain atomic inside `cell_lock`**: Splitting them for performance breaks IPC synchronization and stacks orphaned lines.
+* **DAG readiness mutation must remain single-threaded**: Worker threads must queue their completions. Multi-threaded DAG evaluation reintroduces torn reads.
+* **External code must never pre-acquire Reservoir cell locks**: Modifying the deterministic locking order will result in circular wait OS-level deadlocks.
+* **Impossible VRAM requests must fail fast**: The orchestrator must not attempt to fulfill allocation requests that exceed absolute hardware ceilings.
 
-**Conclusion:** Hive is not the fastest runtime—spinning up OS subprocesses incurs a heavy cold-start tax. However, under extreme memory constraints (capping RAM at 1200MB while attempting to load >2.5GB of models), Hive cleanly failed downstream dependencies, gracefully degraded, and kept the kernel alive. **It survives conditions where naive systems crash.**
+---
+
+## Research Scope / Non-Goals
+
+Hive intentionally does **NOT** optimize for:
+- Raw throughput or sub-millisecond latency.
+- Cloud-scale distributed serving across multiple host machines.
+- State-of-the-art model accuracy or zero-shot routing precision.
+- Agent autonomy or unconstrained reasoning loops.
+
+Hive specifically optimizes for:
+- **Survival** under extreme hardware hostility.
+- **Bounded failure** and predictable degradation.
+- **Memory correctness** and explicit cleanup.
+- **Safe local orchestration** on constrained consumer edge devices.
 
 ---
 
@@ -123,53 +156,11 @@ pip install -e .
 ### Quick Start
 
 ```python
-from hive.core.nucleus import Nucleus
-from hive.runtime.reservoir import Reservoir
-from hive.core.dag import TaskGraph, Task
+import hive
 
-# Initialize runtime with strict memory bounds
-reservoir = Reservoir(max_ram_mb=1200)
-nucleus = Nucleus(reservoir)
+# Run a single instruction through the fully orchestrated Swarm
+context = hive.run("Summarize the impact of torn-write deadlocks in IPC communication.")
 
-# Define a simple execution graph
-g = TaskGraph()
-g.add_task(Task(1, "generate", [], "raw_input"))
-
-# Execute the graph safely
-nucleus.execute(g, "What is the capital of France?")
-
-# Clean up subprocesses
-reservoir.shutdown()
+# The HiveEngine singleton lazily initializes on the first run, 
+# gracefully handles concurrent requests, and manages its own safe teardown.
 ```
-Or run the built-in demo entrypoint:
-```bash
-python -m hive
-```
-
----
-
-## ⚠️ Current Limitations
-
-Hive remains a research prototype.
-
-Known limitations:
-- High cold-start latency due to subprocess boot cost.
-- Routing policies remain heuristic-based.
-- Limited evaluation on production-scale workloads.
-- Complexity overhead may not justify simple sequential workloads.
-- Not optimized for distributed multi-machine execution.
-
----
-
-## 🔬 Research Context
-
-Hive does not claim to invent entirely new theoretical primitives.
-
-Instead, it synthesizes ideas from:
-- operating systems
-- actor runtimes
-- DAG schedulers
-- fault-tolerant distributed systems
-- semantic memory architectures
-
-Its novelty lies in combining these concepts into a resilient local AI orchestration kernel.
