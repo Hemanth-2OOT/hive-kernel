@@ -3,13 +3,17 @@ import json
 import os
 import urllib.request
 
-def query_ollama(model_name, prompt):
-    req = urllib.request.Request("http://localhost:11434/api/generate", method="POST")
+def query_ollama(model_name, prompt, keep_alive_sec: int):
+    # keep_alive_sec is passed on every request to Ollama so the idle-timeout is refreshed
+    # with each inference call, not just at boot. Ollama resets the timer per-request, so
+    # omitting this field on live calls would silently revert to Ollama's 5m default.
+    req = urllib.request.Request("http://127.0.0.1:11434/api/generate", method="POST")
     req.add_header('Content-Type', 'application/json')
     data = json.dumps({
         "model": model_name,
         "prompt": prompt,
         "stream": False,
+        "keep_alive": keep_alive_sec,
         "options": {"temperature": 0.0}
     }).encode()
     with urllib.request.urlopen(req, data=data) as response:
@@ -25,9 +29,20 @@ def main():
     else:
         model_name = "qwen2.5-coder:7b"
 
+    # keep_alive_sec is passed from Reservoir via argv[2], sourced from HiveConfig.
+    # Default matches HiveConfig.ollama_keep_alive_sec (idle_ttl_sec + 60s headroom).
     try:
-        # Ping Ollama to ensure it's alive and loaded
-        query_ollama(model_name, "")
+        keep_alive_sec = int(sys.argv[2]) if len(sys.argv) > 2 else 360
+    except ValueError:
+        keep_alive_sec = 360
+
+    try:
+        # Boot ping: loads the model into Ollama and sets its idle-timeout.
+        # keep_alive_sec is the hard VRAM-reclamation backstop that survives any kill
+        # scenario (SIGKILL, power loss, docker kill) where the finally block below
+        # cannot run. Must be > HiveConfig.idle_ttl_sec to avoid cold-start thrashing
+        # on legitimate calls within Hive's own warm window.
+        query_ollama(model_name, "", keep_alive_sec)
     except Exception as e:
         sys.stderr.write(f"LLM Server failed to boot model {model_name}: {e}\n")
         sys.exit(1)
@@ -49,7 +64,7 @@ def main():
                 if not isinstance(payload, str):
                     raise ValueError("Payload must be a string")
                 
-                gen_text = query_ollama(model_name, payload)
+                gen_text = query_ollama(model_name, payload, keep_alive_sec)
                 
                 resp = {
                     "task_id": task_id,
@@ -73,10 +88,12 @@ def main():
             sys.stdout.write(json.dumps(resp) + "\n")
             sys.stdout.flush()
     finally:
-        # Reached EOF (parent died or closed stdin), or child caught a signal (SIGINT)
-        # Unload the model from Ollama's VRAM
+        # Best-effort fast path: explicitly unload the model on clean shutdown (EOF from
+        # parent death or SIGINT). This reclaims VRAM immediately rather than waiting for
+        # the keep_alive_sec backstop. The backstop handles the cases where this block
+        # cannot run (SIGKILL, power loss).
         try:
-            req = urllib.request.Request("http://localhost:11434/api/generate", method="POST")
+            req = urllib.request.Request("http://127.0.0.1:11434/api/generate", method="POST")
             req.add_header('Content-Type', 'application/json')
             data = json.dumps({"model": model_name, "keep_alive": 0}).encode()
             urllib.request.urlopen(req, data=data)

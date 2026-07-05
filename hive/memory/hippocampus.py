@@ -1,6 +1,9 @@
 import os
 import json
 import numpy as np
+import threading
+import time
+import queue
 from typing import List, Optional
 from hive.memory.verifier import SemanticVerifier, MemoryCandidate, VerifiedMemory, VerificationError
 from hive.config import HiveConfig
@@ -22,25 +25,54 @@ class Hippocampus:
         self.metadata = []
         
         self._load_semantic()
+        
+        import queue
+        self._verify_queue = queue.Queue(maxsize=100)
+        self._in_flight_verifications = set()
+        
+        import threading
+        self._verifier_thread = threading.Thread(target=self._verifier_worker_loop, daemon=True)
+        self._verifier_thread.start()
+
+    def _verifier_worker_loop(self):
+        while True:
+            try:
+                query_text, c, task_id = self._verify_queue.get(timeout=1.0)
+                if self._verifier is None:
+                    continue
+                try:
+                    self._verifier.verify_single(query_text, c, task_id=task_id)
+                except Exception as e:
+                    print(f"[VERIFIER] Background verify failed for {c.memory_id[:8]}: {e}")
+                finally:
+                    self._in_flight_verifications.discard(c.memory_id)
+                    import time
+                    time.sleep(1.0)
+            except queue.Empty:
+                pass
 
     def _load_semantic(self):
         if os.path.exists(self.semantic_vecs_path) and os.path.exists(self.semantic_meta_path):
-            self.embeddings = list(np.load(self.semantic_vecs_path))
-            with open(self.semantic_meta_path, "r") as f:
-                self.metadata = json.load(f)
+            try:
+                self.embeddings = np.load(self.semantic_vecs_path).tolist()
+                with open(self.semantic_meta_path, 'r', encoding='utf-8') as f:
+                    self.metadata = json.load(f)
+            except Exception as e:
+                print(f"[HIPPOCAMPUS] Failed to load semantic memory: {e}")
 
     def _save_semantic(self):
         if self.embeddings:
             np.save(self.semantic_vecs_path, np.array(self.embeddings))
-            with open(self.semantic_meta_path, "w") as f:
-                json.dump(self.metadata, f, indent=2)
+            with open(self.semantic_meta_path, 'w', encoding='utf-8') as f:
+                json.dump(self.metadata, f)
 
     def append_episode(self, trace: dict):
-        with open(self.episodic_path, "a") as f:
+        with open(self.episodic_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(trace) + "\n")
 
     def store_semantic(self, text: str, metadata: dict):
-        """Internal embedding call, keeping vectorization abstract from Nucleus."""
+        if not self.reservoir: return
+        
         metadata["_decay_factor"] = 1.0
         metadata["_memory_id"] = metadata.get("_memory_id", hashlib.md5(text.encode()).hexdigest()[:8])
         metadata["_content"] = text
@@ -56,12 +88,6 @@ class Hippocampus:
         self._save_semantic()
 
     def recall_from_text(self, text: str, top_k: int = None, task_id: int = 0):
-        if top_k is None:
-            top_k = self.config.top_k_recall
-            
-        if not self.embeddings:
-            return []
-            
         resp = self.reservoir.infer("embedding", 0, text)
         if resp["status"] == "error":
             print(f"[HIPPOCAMPUS] Embedding failed for recall: {resp.get('error')}")
@@ -71,7 +97,9 @@ class Hippocampus:
         if not hasattr(self, '_query_vectors_by_task'):
             self._query_vectors_by_task = {}
         self._query_vectors_by_task[task_id] = query_vec
-        
+        if not self.embeddings:
+            return []
+            
         embs = np.array(self.embeddings)
         dot_prods = np.dot(embs, query_vec)
         norms = np.linalg.norm(embs, axis=1) * np.linalg.norm(query_vec)
@@ -114,14 +142,37 @@ class Hippocampus:
         if not hasattr(self, '_verified_memory_ids_by_task'):
             self._verified_memory_ids_by_task = {}
 
-        try:
-            verified = self._verifier.verify(query_text, candidates, task_id=task_id)
-            self._verified_memory_ids_by_task[task_id] = {v.memory_id for v in verified}
-            return verified
-        except VerificationError as e:
-            print(f"[HIPPOCAMPUS] Verification failed, failing closed: {e}")
-            self._verified_memory_ids_by_task[task_id] = set()
-            return []
+        verified = []
+        for c in candidates:
+            cached = self._verifier.get_cached_result(query_text, c.memory_id)
+            if cached is not None:
+                if cached.get("relevant"):
+                    verified.append(VerifiedMemory(
+                        memory_id=c.memory_id,
+                        content=c.content,
+                        embedding_score=c.embedding_score,
+                        verified_relevant=True,
+                        verifier_confidence=1.0,
+                        verifier_reason=cached.get("reason", "Cached hit"),
+                        raw_memory=c.raw_memory
+                    ))
+            else:
+                # Missing from cache! Push to async queue if not already in flight
+                if c.memory_id not in self._in_flight_verifications:
+                    try:
+                        self._verify_queue.put_nowait((query_text, c, task_id))
+                        self._in_flight_verifications.add(c.memory_id)
+                    except queue.Full:
+                        print(f"[VERIFIER] WARN: Queue full, dropping verification request for {c.memory_id[:8]}")
+        
+        # Check if worker thread is alive
+        if not self._verifier_thread.is_alive():
+            print("[VERIFIER] WARN: Worker thread died, restarting...")
+            self._verifier_thread = threading.Thread(target=self._verifier_worker_loop, daemon=True)
+            self._verifier_thread.start()
+            
+        self._verified_memory_ids_by_task[task_id] = {v.memory_id for v in verified}
+        return verified
 
     def penalize_memory(self, text: str, penalty: float = 0.5, task_id: int = 0):
         if not self.embeddings: return

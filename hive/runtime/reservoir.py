@@ -24,12 +24,15 @@ class Reservoir:
         self.cells = {}
         self.last_used = {}
         
+        self._warm_pool = {}  # {proc: Popen}
+        self._warm_pool_lock = threading.Lock()
+        
         self.topology_lock = threading.Lock()
+        self.vram_condition = threading.Condition(self.topology_lock)
         
         # INVARIANT: Callers must NEVER hold a `cell_lock` across a call into another cell
         # (e.g. holding sentiment and calling infer() for qwen). Doing so violates the global
         # CELL_LOCK_ORDER and will trigger a true OS-style circular deadlock, which is currently
-        # caught and aborted by the ReservoirContentionTimeout bounded wait.
         # `cell_locks` should be treated as INTERNAL to Reservoir, NOT a public API.
         self.cell_locks = defaultdict(threading.Lock)
 
@@ -42,6 +45,10 @@ class Reservoir:
             for cell_type, proc in self.cells.items():
                 if proc and proc.poll() is None:
                     total += self._get_vram(cell_type)
+            with self._warm_pool_lock:
+                for cell_type, proc in self._warm_pool.items():
+                    if proc and proc.poll() is None:
+                        total += self._get_vram(cell_type)
             return total
 
     def cleanup_idle(self):
@@ -57,18 +64,41 @@ class Reservoir:
         for c in to_evict:
             print(f"[{c.upper()}] Evicted due to Idle TTL (> {self.idle_ttl_sec}s)", flush=True)
             self._kill_cell_unsafe(c)
+            
+        with self._warm_pool_lock:
+            to_evict_warm = []
+            for cell_type, last_t in self.last_used.items():
+                if cell_type in self._warm_pool and (now - last_t) > self.idle_ttl_sec:
+                    to_evict_warm.append(cell_type)
+            for c in to_evict_warm:
+                proc = self._warm_pool.pop(c)
+                print(f"[{c.upper()}] Warm Pool process terminated due to Idle TTL", flush=True)
+                proc.terminate()
+
 
     def select_victim(self):
         with self.topology_lock:
             return self._select_victim_unsafe()
 
-    def _select_victim_unsafe(self, ignore_locks=False):
+    def _select_victim_unsafe(self, ignore_locks=False, evictor_type: str = "unknown"):
         now = time.time()
         best_victim = None
         max_score = -1.0
         
+        evictor_priority = self.priority.get(evictor_type, 1)
+        
         for cell_type, proc in self.cells.items():
             if not proc or proc.poll() is not None:
+                continue
+            
+            victim_priority = self.priority.get(cell_type, 1)
+            
+            # Strict priority enforcement: lower/equal priority evictors can NEVER evict higher priority cells.
+            if victim_priority < evictor_priority:
+                continue
+                
+            # Violent eviction (ignore_locks=True) is ONLY allowed if the evictor is STRICTLY higher priority.
+            if ignore_locks and victim_priority <= evictor_priority:
                 continue
             
             if not ignore_locks and self.cell_locks[cell_type].locked():
@@ -76,9 +106,8 @@ class Reservoir:
             
             vram = self._get_vram(cell_type)
             idle_seconds = now - self.last_used.get(cell_type, now)
-            priority = self.priority.get(cell_type, 1)
             
-            score = (vram * idle_seconds) / priority
+            score = (vram * idle_seconds) / victim_priority
             if score > max_score:
                 max_score = score
                 best_victim = cell_type
@@ -110,53 +139,22 @@ class Reservoir:
             raise MemoryError(f"Cell {cell_type} requires {required_mb}MB but max budget is {self.max_vram_mb}MB.")
             
         while self._current_vram() + required_mb > self.max_vram_mb:
+            attempts += 1
             if attempts >= 20:
                 active_locks = [c for c in self.cells if self.cell_locks[c].locked()]
                 raise ReservoirContentionTimeout(
                     f"Could not acquire VRAM for {cell_type} (needed {required_mb}MB). Locked cells: {active_locks}"
                 )
                 
-            victim = self._select_victim_unsafe(ignore_locks=False)
+            victim = self._select_victim_unsafe(ignore_locks=False, evictor_type=cell_type)
             if not victim:
-                # If we can't find an unlocked victim, we MUST evict a locked victim to prevent deadlock.
-                # But we must acquire its lock in CELL_LOCK_ORDER!
-                victim = self._select_victim_unsafe(ignore_locks=True)
+                victim = self._select_victim_unsafe(ignore_locks=True, evictor_type=cell_type)
                 if not victim:
-                    raise MemoryError(f"No cells available to evict for {cell_type}")
+                    raise ReservoirContentionTimeout(f"No cells available to evict for {cell_type} (all higher or equal priority)")
                 
-                # Sort acquisition attempts by CELL_LOCK_ORDER
-                locks_to_acquire = [cell_type, victim]
-                locks_to_acquire.sort(key=lambda c: self.cell_lock_order.index(c) if c in self.cell_lock_order else 99)
-                
-                # We need to temporarily release topology lock to avoid deadlocking with threads 
-                # that hold cell locks and need topology lock.
-                self.topology_lock.release()
-                
-                acquired = []
-                success = True
-                import random
-                jitter = random.uniform(0.5, 1.5)
-                for c in locks_to_acquire:
-                    if self.cell_locks[c].acquire(timeout=jitter):
-                        acquired.append(c)
-                    else:
-                        success = False
-                        break
-                
-                # Re-acquire topology lock
-                self.topology_lock.acquire()
-                
-                if success:
-                    # We hold both locks! Kill victim.
-                    print(f"[{victim.upper()}] Evicted due to VRAM Budget (Total would exceed {self.max_vram_mb}MB)", flush=True)
-                    self._kill_cell_unsafe(victim)
-                    for c in reversed(acquired):
-                        self.cell_locks[c].release()
-                else:
-                    for c in reversed(acquired):
-                        self.cell_locks[c].release()
-                    attempts += 1
-                    continue
+                print(f"[{victim.upper()}] Violently evicted due to VRAM Budget (Total would exceed {self.max_vram_mb}MB)", flush=True)
+                self._kill_cell_unsafe(victim)
+                continue
             else:
                 print(f"[{victim.upper()}] Evicted due to VRAM Budget (Total would exceed {self.max_vram_mb}MB)", flush=True)
                 self._kill_cell_unsafe(victim)
@@ -168,31 +166,61 @@ class Reservoir:
     def _kill_cell_unsafe(self, cell_type):
         proc = self.cells.get(cell_type)
         if proc:
-            try:
-                proc.stdin.close()
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.terminate()
             del self.cells[cell_type]
-            if cell_type in self.last_used:
-                del self.last_used[cell_type]
-                
+        else:
+            with self._warm_pool_lock:
+                proc = self._warm_pool.get(cell_type)
+                if proc:
+                    del self._warm_pool[cell_type]
+                    
+        if proc:
+            # Fast-path VRAM unload
             if cell_type in ["hermes3:8b", "qwen2.5-coder:7b", "llm"]:
                 try:
-                    req = urllib.request.Request("http://localhost:11434/api/generate", method="POST")
+                    req = urllib.request.Request("http://127.0.0.1:11434/api/generate", method="POST")
                     req.add_header('Content-Type', 'application/json')
                     urllib.request.urlopen(req, data=json.dumps({"model": cell_type, "keep_alive": 0}).encode())
-                    # Synchronous verify
-                    for _ in range(10):
-                        req_ps = urllib.request.Request("http://localhost:11434/api/ps")
-                        with urllib.request.urlopen(req_ps) as response:
-                            data = json.loads(response.read().decode())
-                            models = [m["name"] for m in data.get("models", [])]
-                            if not any(m.startswith(cell_type) for m in models):
-                                break
-                        time.sleep(1)
+                    
+                    # VRAM unload latency guard: wait for async deallocation
+                    start_time = time.time()
+                    cleared = False
+                    while time.time() - start_time < 5.0:
+                        ps_req = urllib.request.Request("http://127.0.0.1:11434/api/ps", method="GET")
+                        ps_resp = urllib.request.urlopen(ps_req)
+                        ps_data = json.loads(ps_resp.read().decode())
+                        if not any(m.get("name", "").startswith(cell_type) for m in ps_data.get("models", [])):
+                            cleared = True
+                            break
+                        time.sleep(0.1)
+                    
+                    if not cleared:
+                        raise ReservoirContentionTimeout(f"Ollama failed to async-unload {cell_type} VRAM within 5.0s timeout.")
+                except ReservoirContentionTimeout:
+                    raise
                 except Exception as e:
                     print(f"Error unloading {cell_type} from Ollama: {e}", flush=True)
+
+            # Move to warm pool if safe, else terminate
+            safe_to_pool = False
+            # Check if cell is dirty (abandoned request / torn write)
+            is_dirty = getattr(proc, 'is_dirty', False)
+            
+            # Check if cell_lock is acquired by ANY thread (if so, it's mid-request)
+            if not is_dirty and self.cell_locks[cell_type].acquire(blocking=False):
+                safe_to_pool = True
+                self.cell_locks[cell_type].release()
+
+            if safe_to_pool:
+                with self._warm_pool_lock:
+                    # Enforce single slot: kill existing occupant if different
+                    existing_cells = list(self._warm_pool.keys())
+                    for ex_c in existing_cells:
+                        if ex_c != cell_type:
+                            ex_proc = self._warm_pool.pop(ex_c)
+                            ex_proc.terminate()
+                    self._warm_pool[cell_type] = proc
+            else:
+                proc.terminate()
 
     def start_cell(self, cell_type: str) -> None:
         with self.topology_lock:
@@ -203,6 +231,22 @@ class Reservoir:
             return 
             
         required_mb = self.cell_profiles.get(cell_type, 500)
+        
+        recovered_proc = None
+        with self._warm_pool_lock:
+            if cell_type in self._warm_pool:
+                proc = self._warm_pool.pop(cell_type)
+                if proc.poll() is None:
+                    recovered_proc = proc
+                    
+        if recovered_proc:
+            # Must ensure capacity even when recovering, so we can evict lower-priority cells
+            # that took our VRAM while we were idle!
+            self._ensure_capacity_unsafe(required_mb, cell_type=cell_type)
+            self.cells[cell_type] = recovered_proc
+            self.last_used[cell_type] = time.time()
+            print(f"[{cell_type.upper()}] Recovered from warm pool", flush=True)
+            return
         self._ensure_capacity_unsafe(required_mb, cell_type=cell_type)
         
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -214,14 +258,22 @@ class Reservoir:
             script = os.path.join(base_dir, "cells", "llm_server.py")
         else:
             raise ValueError(f"Unknown cell type: {cell_type}")
+
+        # LLM cells receive keep_alive_sec as argv[2] so Ollama's idle-timeout is sourced
+        # from HiveConfig on every /api/generate call (boot + inference), not just at boot.
+        if cell_type in ["hermes3:8b", "qwen2.5-coder:7b", "llm"]:
+            cmd = ["python", script, cell_type, str(self.config.ollama_keep_alive_sec)]
+        else:
+            cmd = ["python", script, cell_type]
             
         proc = subprocess.Popen(
-            ["python", script, cell_type],
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1
         )
+        
         self.cells[cell_type] = proc
         self.last_used[cell_type] = time.time()
 
@@ -241,31 +293,46 @@ class Reservoir:
     def infer(self, cell_type: str, task_id: int, payload: str) -> dict:
         cold_started = False
         
-        while True:
-            with self.topology_lock:
-                if cell_type not in self.cells or self.cells[cell_type].poll() is not None:
-                    print(f"[{cell_type.upper()}] Cold start triggered by infer()...", flush=True)
-                    self._start_cell_unsafe(cell_type)
-                    cold_started = True
-                    break
-                else:
-                    break
-            print(f"[{cell_type.upper()}] VRAM Budget too tight to start. Blocking...", flush=True)
-            time.sleep(1.0)
-
         with self.cell_locks[cell_type]:
+            retries_outer = 0
+            max_outer_retries_outer = 60
+            with self.topology_lock:
+                while retries_outer < max_outer_retries_outer:
+                    if cell_type not in self.cells or self.cells[cell_type].poll() is not None:
+                        # Before we declare it a cold start, check if it's in the warm pool
+                        with self._warm_pool_lock:
+                            in_warm_pool = cell_type in self._warm_pool
+                        
+                        if not in_warm_pool:
+                            print(f"[{cell_type.upper()}] Cold start triggered by infer()...", flush=True)
+                            
+                        try:
+                            self._start_cell_unsafe(cell_type)
+                            cold_started = True
+                            break
+                        except ReservoirContentionTimeout as e:
+                            # We failed to get VRAM. The topology lock is released while waiting!
+                            pass
+                    else:
+                        break
+                        
+                    print(f"[{cell_type.upper()}] VRAM Budget too tight to start. Blocking...", flush=True)
+                    self.vram_condition.wait(1.0)
+                    retries_outer += 1
+                
+            if retries_outer >= max_outer_retries_outer:
+                raise RuntimeError(f"Deadlock or unresolvable VRAM contention for {cell_type} after 5 retries.")
+                
             proc = self.cells.get(cell_type)
             if not proc or proc.poll() is not None:
-                while True:
-                    with self.topology_lock:
-                        self._start_cell_unsafe(cell_type)
-                        cold_started = True
-                        break
-                    print(f"[{cell_type.upper()}] VRAM Budget too tight to start inside lock. Blocking...", flush=True)
-                    time.sleep(1.0)
-                proc = self.cells.get(cell_type)
+                raise RuntimeError(f"Cell {cell_type} closed unexpectedly before generation")
                 
             self.last_used[cell_type] = time.time()
+            
+            # CRITICAL ORDERING: is_dirty must be set to True BEFORE the write() call.
+            # This ensures that if the thread crashes at any point during or after the write,
+            # the flag is reliably set and _kill_cell_unsafe will not pool the dirty process.
+            proc.is_dirty = True
 
             req = {"task_id": task_id, "payload": payload}
             if "CRASH_CLIENT_TORN_WRITE" in payload and task_id == 1:
@@ -320,6 +387,15 @@ class Reservoir:
                 "strength": round(congestion, 4)
             })
             
+            proc.is_dirty = False
+            
+            with self._warm_pool_lock:
+                if cell_type in self.cells:
+                    self._warm_pool[cell_type] = self.cells.pop(cell_type)
+                    self.last_used[cell_type] = time.time()
+            with self.topology_lock:
+                self.vram_condition.notify_all()
+                
             return resp
 
     def shutdown(self) -> None:

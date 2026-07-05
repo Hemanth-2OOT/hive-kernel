@@ -5,6 +5,13 @@ from typing import Dict, List
 class HiveConfig:
     max_vram_mb: int = 6144
     idle_ttl_sec: int = 300
+    # Ollama's internal keep_alive per request. Must be > idle_ttl_sec so Ollama never
+    # evicts a model Hive still considers warm, causing unnecessary cold-start reloads.
+    # TRADEOFF: 360s bounds worst-case orphaned VRAM to 6 minutes (hard-kill path where
+    # the explicit keep_alive:0 unload cannot run) in exchange for avoiding reload
+    # thrashing on inter-call gaps under 5 minutes (idle_ttl_sec). Reducing this value
+    # tightens VRAM reclamation but risks cold-start penalties on slower DAG paths.
+    ollama_keep_alive_sec: int = 360   # idle_ttl_sec (300) + 60s headroom
     exploration_rate: float = 0.1
     similarity_threshold: float = 0.5
     top_k_recall: int = 3

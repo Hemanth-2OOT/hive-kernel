@@ -1,0 +1,10 @@
+{
+  "true_positive": {
+    "pass": 18,
+    "fail": 2
+  },
+  "hard_negative": {
+    "pass": 20,
+    "fail": 0
+  }
+}

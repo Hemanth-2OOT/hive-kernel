@@ -1,0 +1,239 @@
+{
+  "metadata": {
+    "n_iterations": 30,
+    "inter_iter_sleep_sec": 5,
+    "p95_threshold_ms": 6000,
+    "stdev_threshold_ms": 800,
+    "methodology": "pre-registered in review_bundle.md \u00a715.2.1",
+    "timestamp": "2026-07-04T09:24:52Z"
+  },
+  "models": {
+    "qwen2.5-coder:7b": {
+      "samples": [
+        {
+          "iteration": 1,
+          "wall_ms": 6030.6,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 2,
+          "wall_ms": 5185.8,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 3,
+          "wall_ms": 5199.4,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 4,
+          "wall_ms": 5283.7,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 5,
+          "wall_ms": 5127.5,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 6,
+          "wall_ms": 5149.3,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 7,
+          "wall_ms": 5130.5,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 8,
+          "wall_ms": 5093.6,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 9,
+          "wall_ms": 5183.2,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 10,
+          "wall_ms": 4935.1,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 11,
+          "wall_ms": 5216.9,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 12,
+          "wall_ms": 5142.8,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 13,
+          "wall_ms": 5283.2,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 14,
+          "wall_ms": 5218.9,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 15,
+          "wall_ms": 5190.3,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 16,
+          "wall_ms": 5162.8,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 17,
+          "wall_ms": 4732.3,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 18,
+          "wall_ms": 5119.7,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 19,
+          "wall_ms": 5221.2,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 20,
+          "wall_ms": 5174.9,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 21,
+          "wall_ms": 5231.6,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 22,
+          "wall_ms": 5123.8,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 23,
+          "wall_ms": 5149.1,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 24,
+          "wall_ms": 4820.5,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 25,
+          "wall_ms": 5236.3,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 26,
+          "wall_ms": 4857.6,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 27,
+          "wall_ms": 5171.5,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 28,
+          "wall_ms": 5118.6,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 29,
+          "wall_ms": 5186.6,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        },
+        {
+          "iteration": 30,
+          "wall_ms": 5289.4,
+          "cold_start": true,
+          "vram_mb_before": 0,
+          "status": "done"
+        }
+      ],
+      "stats": {
+        "model": "qwen2.5-coder:7b",
+        "n": 30,
+        "min_ms": 4732.3,
+        "max_ms": 6030.6,
+        "mean_ms": 5165.6,
+        "stdev_ms": 210.3,
+        "p50_ms": 5173.2,
+        "p95_ms": 5286.8,
+        "p99_ms": 5815.7,
+        "verdict": "UNIMODAL \u2014 single-slot pool sufficient",
+        "histogram_ascii": "      ms  count  histogram\n--------------------------------------------------------------------------------\n    4732      1  #####\n    4797      2  ##########\n    4862      0  \n    4927      1  #####\n    4992      0  \n    5057      3  ###############\n    5122     12  ############################################################\n    5187      7  ###################################\n    5252      3  ###############\n    5317      0  \n    5381      0  \n    5446      0  \n    5511      0  \n    5576      0  \n    5641      0  \n    5706      0  \n    5771      0  \n    5836      0  \n    5901      0  \n    5966      1  #####"
+      }
+    }
+  }
+}
